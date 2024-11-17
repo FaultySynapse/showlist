@@ -7,7 +7,7 @@ import re
 import asyncio
 
 
-DATE_FORMATE = "%m%%2F%d%%2F%Y"
+DATE_FORMATE = "%m/%d/%Y"
 BASE_URL = "https://www.songkick.com"
 GEUSS_PATTERN = r"\/concerts\/\d+-([0-9a-z\-]+)-at-([0-9a-z\-]+)"
 re_geuss = re.compile(GEUSS_PATTERN)
@@ -61,17 +61,14 @@ class ParseListing(HTMLParser):
 
 class SFShows:
 
-    def __init__(self, start = None, days = None):
+    def __init__(self, client: ClientSession, start = None, days = 0, workers = 1):
         if start is None:
             start = date.today() + timedelta(days=20)
         
-        if days is None:
-            days = 2
-        
         self.start = start
-        self.end = start + timedelta(days=2)
-        self.s = ClientSession()
-    
+        self.end = start + timedelta(days=days)
+        self.s = client
+        self.details_sem = asyncio.Semaphore(workers)
     async def get_list_page(self, page):
         r = await self.s.get(
             url=BASE_URL + "/metro-areas/26330-us-sf-bay-area",
@@ -80,7 +77,7 @@ class SFShows:
                 "filters[maxDate]":self.end.strftime(DATE_FORMATE),
                 "page":str(page),
             },
-            timeout=1,
+            # timeout=1,
         )
 
         if r.status != 200:
@@ -90,27 +87,27 @@ class SFShows:
         parser.feed(await r.text())
         return parser.get_events()
     
-    async def get_all_event(self, limit = 500):
-        events = []
+    async def get_all_event(self):
         page = 1
         next_page = await self.get_list_page(page)
-        while len(next_page) and len(events) < limit:
+        while len(next_page):
             for link in next_page:
                 yield link
             page += 1
             next_page = await self.get_list_page(page)
     
     async def get_details(self, link:str) -> List[Show]:
-        r = await self.s.get(
-            url=BASE_URL + link,
-        )
+        async with self.details_sem:
+            r = await self.s.get(
+                url=BASE_URL + link,
+            )
 
-        if r.status != 200:
-            raise Exception(f"code {r.status}")
+            if r.status != 200:
+                raise Exception(f"code {r.status}")
         
-        parser = ParseEvent() 
-        parser.feed(await r.text())
-        return parser.get_shows()
+            parser = ParseEvent() 
+            parser.feed(await r.text())
+            return parser.get_shows()
     
     def geuss_details(self, link:str) -> Show:
         match = re_geuss.match(link)
@@ -122,15 +119,18 @@ class SFShows:
             match.group(2).replace("-"," "),
         )
     
-    async def all_shows(self, limit = 500):
-        async for link in self.get_all_event(limit=limit):
-            yield asyncio.create_task(self.get_details(link=link))
+    async def all_shows(self):
+        async for link in self.get_all_event():
+            yield self.get_details(link=link)
 
         
 async def make_play_list():
-    spider = SFShows()
-    shows = await asyncio.gather(*[show async for show in spider.all_shows()])
-    print(shows)
+    async with ClientSession() as s:
+        spider = SFShows(s, workers=5, days=7)
+        tasks = [asyncio.create_task(show) async for show in spider.all_shows()]
+        shows = await asyncio.gather(*tasks)
+        print(shows)
+        print(len(shows))
 
 asyncio.run(make_play_list())
 
