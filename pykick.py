@@ -1,7 +1,7 @@
 from aiohttp import ClientSession
 from datetime import date, timedelta
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 from html.parser import HTMLParser
 import re
 import asyncio
@@ -119,11 +119,22 @@ class SFShows:
             match.group(2).replace("-"," "),
         )
     
-    async def all_shows(self):
+    async def all_shows(self, limit: Optional[int] = None):
+        count = 0
         async for link in self.get_all_event():
+            if limit is not None and count >= limit:
+                break
+
+            count += 1
             yield self.get_details(link=link)
 
         
+async def shows(workers=5, start = None, days = 7, limit: Optional[int] = None) -> List[Show]:
+    async with ClientSession() as s:
+        spider = SFShows(s,start=start, workers=workers, days=days)
+        tasks = [asyncio.create_task(show) async for show in spider.all_shows(limit=limit)]
+        return [show for shows in await asyncio.gather(*tasks) for show in shows]
+
 async def make_play_list():
     async with ClientSession() as s:
         spider = SFShows(s, workers=5, days=7)
@@ -132,6 +143,7 @@ async def make_play_list():
         print(shows)
         print(len(shows))
 
-asyncio.run(make_play_list())
+if __name__ == "__main__":
+    asyncio.run(make_play_list())
 
 
